@@ -1,0 +1,11 @@
+langchain-google-genai
+langchain-community
+langgraph
+langgraph-checkpoint-sqlite
+streamlit
+pandas
+matplotlib
+tavily-python
+python-dotenv
+sqlalchemy
+tabulate
