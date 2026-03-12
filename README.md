@@ -1,29 +1,32 @@
 # 🤖 Intelligent Data Analysis & Visualization Agent
 
-LangGraph와 Streamlit을 결합한 지능형 데이터 분석 및 시각화 에이전트입니다. Google Gemini LLM을 사용하여 자연어로 SQL 쿼리, 웹 검색, 그리고 데이터 시각화를 수행할 수 있습니다.
+LangGraph와 Streamlit을 결합한 지능형 데이터 분석 및 시각화 에이전트입니다. **Google Gemini 2.5 Flash Lite** 모델을 기본으로 사용하여 자연어로 SQL 쿼리, 실시간 웹 검색, 그리고 데이터 시각화를 수행합니다.
 
 ## 🚀 주요 기능
 
-- **Stateful AI Workflow**: LangGraph를 활용한 상태 기반 에이전트 설계.
+- **Stateful AI Workflow**: **LangGraph**를 활용한 정교한 상태 기반 워크플로우 설계.
 - **다중 도구 통합 (Multi-Tooling)**:
-    - **SQL Search**: 자연어를 SQL로 변환하여 SQLite 데이터베이스 조회.
-    - **Web Search**: Tavily API를 통한 실시간 웹 정보 검색 및 요약.
-    - **Python Visualizer**: 데이터 분석 결과를 Matplotlib 차트로 자동 시각화.
+    - **SQL Search**: 자연어를 SQL로 변환하여 SQLite(`data.db`) 조회.
+    - **Web Search**: Tavily API를 통한 실시간 웹 정보 검색 및 마크다운 형식 결과 제공.
+    - **Python Visualizer**: 데이터 분석 결과를 Matplotlib 차트로 자동 시각화 및 실행 코드 제공.
 - **스마트 메모리 관리**:
-    - **Sliding Window**: 최근 10회(20개 메시지)의 대화 맥락을 기억하여 정확한 답변 제공.
-    - **Persistent History**: SQLite 기반 체크포인터를 사용하여 대화 내역 영구 저장 및 복구.
+    - **Sliding Window**: **최근 20개**의 메시지 맥락을 유지하여 Gemini API 최적화 및 토큰 관리.
+    - **Persistent History**: **AsyncSqliteSaver**(`checkpoints.db`)를 사용하여 대화 상태를 영구적으로 저장 및 복구.
 - **직관적인 UI (Streamlit)**:
-    - 실시간 토큰 스트리밍 응답.
-    - **Result Explorer**: 데이터 테이블, 실행된 SQL 쿼리, 웹 검색 결과, 시각화 차트, 실행된 Python 코드를 탭별로 분리하여 제공.
-    - **Session Manager**: 사이드바를 통한 과거 대화 목록 관리 및 새 대화 시작 기능.
+    - **Real-time Streaming**: LLM 응답 토큰 단위 실시간 렌더링.
+    - **Result Explorer**: 📊 데이터 테이블, 📜 SQL 쿼리, 🌐 웹 검색 결과, 📈 시각화 차트, 💻 실행 코드를 탭별로 분리하여 제공.
+    - **Dashboard Sidebar**: 
+        - **🗄️ Database Tables**: 현재 DB의 테이블 목록과 데이터 건수 실시간 표시.
+        - **📜 Chat History**: 과거 대화 목록 관리 및 특정 세션 복구.
+        - **🗑️ Clear History**: 한 번의 클릭으로 모든 대화 내역 및 체크포인트 초기화.
 
 ## 🛠 Tech Stack
 
-- **LLM**: Google Gemini 2.0 Flash
+- **LLM**: **Google Gemini 2.5 Flash Lite** (default), 1.5 Pro, 2.0 Flash
 - **Framework**: LangGraph, LangChain
 - **Frontend**: Streamlit
-- **Database**: SQLite (Data & Chat Checkpoints)
-- **Tools**: Tavily Search, Pandas, Matplotlib
+- **Database**: SQLite (Data, Meta, & Chat Checkpoints)
+- **Tools**: Tavily Search, Pandas, Matplotlib, aiosqlite
 
 ## ⚙️ 설치 및 실행 방법
 
@@ -54,18 +57,11 @@ python3 init_db.py
 streamlit run app.py
 ```
 
-## 🔍 사용 예시
-
-- **데이터 조회**: "현재 판매 중인 제품 목록과 가격을 알려줘."
-- **데이터 시각화**: "가장 비싼 제품 TOP 3를 막대 그래프로 그려줘."
-- **웹 검색 분석**: "최근 AI 트렌드에 대해 검색하고 주요 키워드를 요약해줘."
-- **복합 작업**: "웹에서 스마트폰 시장 점유율을 검색해서 시각화 해줘."
-
 ## 📂 프로젝트 구조
 
-- `app.py`: Streamlit 메인 UI 및 세션 관리 로직.
-- `chatbot.py`: LangGraph 워크플로우 및 에이전트 노드 정의.
-- `tools.py`: SQL, Web Search, Python Code 실행 도구 모음.
-- `init_db.py`: 테스트용 SQLite 데이터베이스 생성 스크립트.
-- `checkpoints.sqlite`: 대화 내역 영구 저장용 DB.
-- `sessions_meta.db`: 대화 목록 메타데이터 저장용 DB.
+- `app.py`: Streamlit 메인 UI, 비동기 에이전트 브리지 및 세션 관리.
+- `chatbot.py`: LangGraph 워크플로우, `oracle` 노드(메시지 정제 로직 포함), `tool_node` 정의.
+- `tools.py`: SQL 쿼리, Tavily 웹 검색, Python 시각화 도구 및 스키마 제공 기능.
+- `init_db.py`: 테스트용 `data.db` 생성 스크립트.
+- `checkpoints.db`: LangGraph 대화 상태 영구 저장용 SQLite DB.
+- `sessions_meta.db`: 사이드바 대화 목록 메타데이터 저장용 DB.
