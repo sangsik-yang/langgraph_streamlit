@@ -1,28 +1,33 @@
-from typing import Annotated, TypedDict, List, Optional, Any
+from typing import Annotated, TypedDict, List, Optional, Any, Union
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from tools import sql_query_tool, get_web_search_tool, python_visualizer_tool, get_db_schema
 import os
 import sqlite3
 from dotenv import load_dotenv
+import pandas as pd
 
 load_dotenv()
 
 # 1. State Definition
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
-    sql_data: Optional[str] # Markdown string of DF for the LLM
-    generated_sql: Optional[str] # Capture the raw SQL query
-    web_data: Optional[str] # Capture structured data from web search
+    sql_data: Optional[List[dict]]
+    generated_sql: Optional[str]
+    web_search_result: Optional[str]
     image_path: Optional[str]
-    generated_code: Optional[str] # Capture the Python code
+    generated_code: Optional[str]
     current_model: str
 
 # 2. Setup LLM and Tools
-def get_model(model_name: str = "gemini-2.0-flash"):
+def get_model(model_name: str = "gemini-2.5-flash-lite"):
+    valid_models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp", "gemini-2.5-flash-lite"]
+    if model_name not in valid_models:
+        model_name = "gemini-2.5-flash-lite"
+    
     llm = ChatGoogleGenerativeAI(model=model_name, streaming=True)
     tools = [sql_query_tool, get_web_search_tool(), python_visualizer_tool]
     return llm.bind_tools(tools)
@@ -31,10 +36,9 @@ def get_model(model_name: str = "gemini-2.0-flash"):
 def oracle(state: AgentState):
     """The main LLM node that decides the next action."""
     full_history = state["messages"]
+    
+    # 1. Extract System Message
     system_msg = [m for m in full_history if isinstance(m, SystemMessage)]
-    # Memory Strategy: Sliding Window (Last 20 messages for ~10 rounds of conversation)
-    recent_msgs = full_history[-20:] if len(full_history) > 20 else full_history
-
     if not system_msg:
         prompt_content = f"""You are a senior data analysis assistant. 
 {get_db_schema()}
@@ -54,9 +58,27 @@ When using python_visualizer_tool:
 """
         system_msg = [SystemMessage(content=prompt_content)]
 
-    input_messages = system_msg + [m for m in recent_msgs if not isinstance(m, SystemMessage)]
+    # 2. Sliding Window Strategy (Last 20 messages as per GEMINI.md mandate)
+    # Gemini requires strict sequence: [System] -> [Human] -> [AI(tool)] -> [Tool] -> [AI]
+    # To prevent 400 errors, we must ensure ToolMessages are not orphaned from their AI(tool_calls).
+    
+    raw_recent = full_history[-20:] if len(full_history) > 20 else full_history
+    
+    # Clean up orphaned messages to satisfy Gemini API constraints
+    cleaned_recent = []
+    for i, msg in enumerate(raw_recent):
+        # Skip ToolMessages if they are the first in the window (they must follow an AI message)
+        if isinstance(msg, ToolMessage) and not cleaned_recent:
+            continue
+        cleaned_recent.append(msg)
 
-    model = get_model(state.get("current_model", "gemini-2.0-flash"))
+    # Final check: Ensure the first message after System is not an AIMessage or ToolMessage
+    while cleaned_recent and isinstance(cleaned_recent[0], (ToolMessage, AIMessage)) and not (isinstance(cleaned_recent[0], AIMessage) and cleaned_recent[0].tool_calls):
+        cleaned_recent.pop(0)
+
+    input_messages = system_msg + cleaned_recent
+
+    model = get_model(state.get("current_model", "gemini-2.5-flash-lite"))
     response = model.invoke(input_messages)
 
     return {"messages": [response]}
@@ -68,7 +90,7 @@ def tool_node(state: AgentState):
     last_message = messages[-1]
     
     tool_outputs = []
-    sql_markdown = None
+    structured_sql_data = None
     captured_sql = None
     captured_web = None
     image_found = None
@@ -81,10 +103,30 @@ def tool_node(state: AgentState):
         if tool_name == "sql_query_tool":
             captured_sql = args.get("query")
             result = sql_query_tool.invoke(args)
-            sql_markdown = result
-        elif tool_name == "tavily_search_results_json":
-            result = get_web_search_tool().invoke(args)
-            captured_web = str(result) # Store web search results as context
+            try:
+                if captured_sql.strip().upper().startswith("SELECT"):
+                    conn = sqlite3.connect('data.db')
+                    df = pd.read_sql_query(captured_sql, conn)
+                    structured_sql_data = df.to_dict(orient="records")
+                    conn.close()
+            except Exception as e:
+                print(f"SQL Data Extraction Error: {e}")
+                
+        elif tool_name in ["tavily_search_results_json", "tavily_search_results"]:
+            search_tool = get_web_search_tool()
+            result = search_tool.invoke(args)
+            
+            # Tavily 결과를 읽기 쉬운 마크다운 형식으로 변환
+            if isinstance(result, list):
+                markdown_results = "### 🌐 Web Search Findings\n\n"
+                for item in result:
+                    title = item.get('title', 'No Title')
+                    url = item.get('url', '#')
+                    content = item.get('content', '')
+                    markdown_results += f"**[{title}]({url})**\n\n{content}\n\n---\n"
+                captured_web = markdown_results
+            else:
+                captured_web = str(result)
         elif tool_name == "python_visualizer_tool":
             captured_code = args.get("code")
             result = python_visualizer_tool.invoke(args)
@@ -93,22 +135,17 @@ def tool_node(state: AgentState):
         else:
             result = f"Error: Tool {tool_name} not found."
             
-        from langchain_core.messages import ToolMessage
-        tool_outputs.append(ToolMessage(
-            content=str(result),
-            tool_call_id=tool_call["id"]
-        ))
+        tool_outputs.append(ToolMessage(content=str(result), tool_call_id=tool_call["id"]))
         
     return {
         "messages": tool_outputs,
-        "sql_data": sql_markdown,
+        "sql_data": structured_sql_data,
         "generated_sql": captured_sql,
-        "web_data": captured_web,
+        "web_search_result": captured_web,
         "image_path": image_found,
         "generated_code": captured_code
     }
 
-# 4. Conditional Logic
 def should_continue(state: AgentState):
     last_message = state["messages"][-1]
     if last_message.tool_calls:
@@ -116,20 +153,14 @@ def should_continue(state: AgentState):
     return END
 
 # 5. Build Graph
-def create_graph(conn):
+def create_graph(checkpointer=None):
     workflow = StateGraph(AgentState)
     workflow.add_node("oracle", oracle)
     workflow.add_node("tools", tool_node)
     workflow.add_edge(START, "oracle")
     workflow.add_conditional_edges("oracle", should_continue, {"tools": "tools", END: END})
     workflow.add_edge("tools", "oracle")
-    
-    checkpointer = SqliteSaver(conn)
     return workflow.compile(checkpointer=checkpointer)
 
-# Context manager or global connection for the checkpointer
-def get_graph_app():
-    conn = sqlite3.connect("checkpoints.sqlite", check_same_thread=False)
-    return create_graph(conn)
-
-app_graph = get_graph_app()
+def get_graph_app(checkpointer=None):
+    return create_graph(checkpointer)
