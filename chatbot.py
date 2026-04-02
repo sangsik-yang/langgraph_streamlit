@@ -1,14 +1,17 @@
-from typing import Annotated, TypedDict, List, Optional, Any, Union
+from typing import Annotated, TypedDict, List, Optional
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
-from tools import sql_query_tool, get_web_search_tool, python_visualizer_tool, get_db_schema
+from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
+from tools import (
+    sql_query_tool,
+    get_web_search_tool,
+    python_visualizer_tool,
+    get_db_schema,
+    run_read_only_sql,
+)
 import os
-import sqlite3
 from dotenv import load_dotenv
-import pandas as pd
 
 load_dotenv()
 
@@ -21,6 +24,7 @@ class AgentState(TypedDict):
     image_path: Optional[str]
     generated_code: Optional[str]
     current_model: str
+    thread_id: Optional[str]
 
 # 2. Setup LLM and Tools
 def get_model(model_name: str = "gemini-2.5-flash-lite"):
@@ -54,7 +58,8 @@ When using python_visualizer_tool:
 - You can use either local SQL data OR web data you just found to create charts.
 - For web data, create a dict or list in the code first, then convert to pd.DataFrame().
 - Ensure each command is on a new line. 
-- ALWAYS end with plt.savefig('temp_plot.png').
+- ALWAYS end with plt.savefig(output_path).
+- The variable output_path is already available in the execution environment.
 """
         system_msg = [SystemMessage(content=prompt_content)]
 
@@ -93,8 +98,10 @@ def tool_node(state: AgentState):
     structured_sql_data = None
     captured_sql = None
     captured_web = None
-    image_found = None
+    image_found = state.get("image_path")
     captured_code = None
+    thread_id = state.get("thread_id") or "default"
+    image_output_path = os.path.join("artifacts", f"{thread_id}.png")
     
     for tool_call in last_message.tool_calls:
         tool_name = tool_call["name"]
@@ -104,11 +111,9 @@ def tool_node(state: AgentState):
             captured_sql = args.get("query")
             result = sql_query_tool.invoke(args)
             try:
-                if captured_sql.strip().upper().startswith("SELECT"):
-                    conn = sqlite3.connect('data.db')
-                    df = pd.read_sql_query(captured_sql, conn)
+                if captured_sql:
+                    df = run_read_only_sql(captured_sql)
                     structured_sql_data = df.to_dict(orient="records")
-                    conn.close()
             except Exception as e:
                 print(f"SQL Data Extraction Error: {e}")
                 
@@ -129,9 +134,13 @@ def tool_node(state: AgentState):
                 captured_web = str(result)
         elif tool_name == "python_visualizer_tool":
             captured_code = args.get("code")
-            result = python_visualizer_tool.invoke(args)
-            if "temp_plot.png" in result:
-                image_found = "temp_plot.png"
+            tool_args = {
+                "code": captured_code,
+                "output_path": image_output_path,
+            }
+            result = python_visualizer_tool.invoke(tool_args)
+            if os.path.exists(image_output_path):
+                image_found = image_output_path
         else:
             result = f"Error: Tool {tool_name} not found."
             

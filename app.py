@@ -2,7 +2,7 @@ import streamlit as st
 import uuid
 import pandas as pd
 import asyncio
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from chatbot import get_graph_app
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 import os
@@ -15,62 +15,83 @@ load_dotenv()
 
 # --- Database for Chat Sessions Metadata ---
 def init_session_db():
-    conn = sqlite3.connect("sessions_meta.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS chat_sessions (
-            thread_id TEXT PRIMARY KEY,
-            title TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
+    with sqlite3.connect("sessions_meta.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                thread_id TEXT PRIMARY KEY,
+                title TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
 
 def save_session(thread_id, title):
-    conn = sqlite3.connect("sessions_meta.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO chat_sessions (thread_id, title) VALUES (?, ?)", (thread_id, title))
-    conn.commit()
-    conn.close()
+    with sqlite3.connect("sessions_meta.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO chat_sessions (thread_id, title) VALUES (?, ?)", (thread_id, title))
+        conn.commit()
 
 def get_all_sessions():
-    conn = sqlite3.connect("sessions_meta.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT thread_id, title FROM chat_sessions ORDER BY created_at DESC")
-    sessions = cursor.fetchall()
-    conn.close()
-    return sessions
+    with sqlite3.connect("sessions_meta.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT thread_id, title FROM chat_sessions ORDER BY created_at DESC")
+        return cursor.fetchall()
 
 def get_db_tables():
     """Returns a list of table names and their row counts from data.db"""
     if not os.path.exists("data.db"):
         return []
     try:
-        conn = sqlite3.connect("data.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-        tables = cursor.fetchall()
-        
-        table_info = []
-        for table in tables:
-            name = table[0]
-            cursor.execute(f"SELECT COUNT(*) FROM {name}")
-            count = cursor.fetchone()[0]
-            table_info.append((name, count))
-        
-        conn.close()
-        return table_info
+        with sqlite3.connect("data.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            tables = cursor.fetchall()
+
+            table_info = []
+            for table in tables:
+                name = table[0]
+                cursor.execute(f"SELECT COUNT(*) FROM {name}")
+                count = cursor.fetchone()[0]
+                table_info.append((name, count))
+
+            return table_info
     except Exception as e:
         return []
 
+def reset_ui_state(new_thread=True):
+    st.session_state.messages = []
+    if new_thread or "thread_id" not in st.session_state:
+        st.session_state.thread_id = str(uuid.uuid4())
+    st.session_state.sql_data = None
+    st.session_state.generated_sql = None
+    st.session_state.web_search_result = None
+    st.session_state.image_path = None
+    st.session_state.generated_code = None
+
+
+def ensure_ui_state():
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "thread_id" not in st.session_state:
+        st.session_state.thread_id = str(uuid.uuid4())
+    if "sql_data" not in st.session_state:
+        st.session_state.sql_data = None
+    if "generated_sql" not in st.session_state:
+        st.session_state.generated_sql = None
+    if "web_search_result" not in st.session_state:
+        st.session_state.web_search_result = None
+    if "image_path" not in st.session_state:
+        st.session_state.image_path = None
+    if "generated_code" not in st.session_state:
+        st.session_state.generated_code = None
+
 def delete_all_sessions():
     # 1. Clear session metadata
-    conn = sqlite3.connect("sessions_meta.db")
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM chat_sessions")
-    conn.commit()
-    conn.close()
+    with sqlite3.connect("sessions_meta.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM chat_sessions")
+        conn.commit()
     
     # 2. Clear LangGraph checkpoints (delete the file and let it be recreated)
     if os.path.exists("checkpoints.db"):
@@ -78,12 +99,17 @@ def delete_all_sessions():
             os.remove("checkpoints.db")
         except Exception as e:
             # If file is locked, we can at least clear the tables
-            conn = sqlite3.connect("checkpoints.db")
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM checkpoints")
-            cursor.execute("DELETE FROM writes")
-            conn.commit()
-            conn.close()
+            with sqlite3.connect("checkpoints.db") as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM checkpoints")
+                cursor.execute("DELETE FROM writes")
+                conn.commit()
+
+    if os.path.exists("artifacts"):
+        for filename in os.listdir("artifacts"):
+            path = os.path.join("artifacts", filename)
+            if os.path.isfile(path):
+                os.remove(path)
 
 init_session_db()
 
@@ -91,20 +117,7 @@ init_session_db()
 st.set_page_config(page_title="Intelligent AI Agent", layout="wide")
 
 # 2. Initialize Session State
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "thread_id" not in st.session_state:
-    st.session_state.thread_id = str(uuid.uuid4())
-if "sql_data" not in st.session_state:
-    st.session_state.sql_data = None
-if "generated_sql" not in st.session_state:
-    st.session_state.generated_sql = None
-if "web_search_result" not in st.session_state:
-    st.session_state.web_search_result = None
-if "image_path" not in st.session_state:
-    st.session_state.image_path = None
-if "generated_code" not in st.session_state:
-    st.session_state.generated_code = None
+ensure_ui_state()
 
 async def get_session_history(thread_id):
     async with AsyncSqliteSaver.from_conn_string("checkpoints.db") as checkpointer:
@@ -123,13 +136,7 @@ with st.sidebar:
     )
 
     if st.button("➕ New Chat"):
-        st.session_state.messages = []
-        st.session_state.thread_id = str(uuid.uuid4())
-        st.session_state.sql_data = None
-        st.session_state.generated_sql = None
-        st.session_state.web_search_result = None
-        st.session_state.image_path = None
-        st.session_state.generated_code = None
+        reset_ui_state()
         st.rerun()
     
     st.divider()
@@ -146,13 +153,7 @@ with st.sidebar:
     
     if st.button("🗑️ Clear All History", help="Delete all chat sessions and checkpoints"):
         delete_all_sessions()
-        st.session_state.messages = []
-        st.session_state.thread_id = str(uuid.uuid4())
-        st.session_state.sql_data = None
-        st.session_state.generated_sql = None
-        st.session_state.web_search_result = None
-        st.session_state.image_path = None
-        st.session_state.generated_code = None
+        reset_ui_state()
         st.success("All history cleared!")
         st.rerun()
 
@@ -200,7 +201,8 @@ async def run_agent(prompt, response_placeholder):
         config = {"configurable": {"thread_id": st.session_state.thread_id}}
         inputs = {
             "messages": [HumanMessage(content=prompt)],
-            "current_model": model_option
+            "current_model": model_option,
+            "thread_id": st.session_state.thread_id,
         }
         
         full_response = ""
